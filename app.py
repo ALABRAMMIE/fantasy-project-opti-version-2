@@ -6,17 +6,17 @@ from io import BytesIO
 from collections import defaultdict
 
 # --- Page Configuration ---
-st.set_page_config(page_title="NBA Team Optimizer v3", layout="wide")
-st.title("🏀 NBA Team Optimizer v3 (Fixed Win/Loss Points)")
+st.set_page_config(page_title="NBA Team Optimizer v4", layout="wide")
+st.title("🏀 NBA Team Optimizer v4")
 st.markdown("""
-**Hoe werkt het?**
-1. Upload je Excel met Teams.
-2. Stel links in de tabel in hoeveel punten een team krijgt bij **Winst** of **Verlies**.
-3. De optimizer simuleert de wedstrijden en kiest de beste combinatie.
+**Features:**
+1. **Fixed Points:** Jij bepaalt hoeveel punten winst/verlies oplevert per Tier.
+2. **Game Logic:** Max 1 team per wedstrijd (optioneel).
+3. **Control:** Forceer teams om mee te doen (Include) of sluit ze uit (Exclude).
 """)
 
 # ==========================================
-# 1. SIDEBAR: INSTELLINGEN & SCENARIO'S
+# 1. SIDEBAR: INSTELLINGEN & TIERS
 # ==========================================
 
 st.sidebar.header("⚙️ Solver Settings")
@@ -32,15 +32,14 @@ avoid_opposing = st.sidebar.checkbox("Max 1 team per wedstrijd kiezen", value=Tr
 
 st.sidebar.markdown("---")
 st.sidebar.header("🎲 Tiers & Punten")
-st.sidebar.info("Vul hieronder in hoeveel kans (Win %) een Tier heeft, en hoeveel vaste punten ze krijgen bij Winst of Verlies.")
 
-# Standaard configuratie (met jouw voorbeeldwaarden)
+# Standaard configuratie
 default_tier_data = {
     "Tier": [1, 2, 3, 4, 5],
     "Label": ["Heavy Favorite", "Favorite", "Toss Up", "Underdog", "Longshot"],
-    "Win %": [90, 70, 50, 30, 10],      # Kans
-    "Pts WIN": [450, 450, 450, 450, 450], # Punten als ze winnen
-    "Pts LOSS": [200, 200, 200, 200, 200] # Punten als ze verliezen
+    "Win %": [90, 70, 50, 30, 10],      
+    "Pts WIN": [450, 450, 450, 450, 450], 
+    "Pts LOSS": [200, 200, 200, 200, 200] 
 }
 
 df_tier_config = pd.DataFrame(default_tier_data)
@@ -60,7 +59,7 @@ edited_tiers = st.sidebar.data_editor(
     key="tier_editor"
 )
 
-# Settings opslaan in dictionary voor snelle lookup
+# Settings opslaan in dictionary
 tier_settings = {}
 for index, row in edited_tiers.iterrows():
     try:
@@ -73,53 +72,79 @@ for index, row in edited_tiers.iterrows():
         continue
 
 # ==========================================
-# 2. FILE UPLOAD & VALIDATION
+# 2. FILE UPLOAD & PREPARATION
 # ==========================================
 
 st.markdown("### 1. Upload Teams Data")
 uploaded_file = st.file_uploader("Upload Excel bestand", type=["xlsx"])
 
-if not uploaded_file:
-    st.info("Upload een Excel bestand met kolommen: Name, Value, OutcomeTier, GameID")
+nba_teams = []
+must_include = []
+must_exclude = []
+df = pd.DataFrame()
+
+if uploaded_file:
+    try:
+        df = pd.read_excel(uploaded_file)
+        
+        # Check verplichte kolommen
+        required_cols = {"Name", "Value", "OutcomeTier"}
+        if not required_cols.issubset(df.columns):
+            st.error(f"❌ Het bestand mist: {required_cols - set(df.columns)}")
+            st.stop()
+        
+        # GameID fix
+        if "GameID" not in df.columns:
+            st.warning("⚠️ Geen 'GameID' gevonden. Wedstrijd-koppeling staat uit.")
+            df["GameID"] = df.index 
+
+        # Data types
+        df["OutcomeTier"] = pd.to_numeric(df["OutcomeTier"], errors='coerce').fillna(3).astype(int)
+        nba_teams = df.to_dict("records")
+        
+        # --- NIEUW: INCLUDE / EXCLUDE SELECTORS ---
+        # We doen dit pas als het bestand er is, zodat we de teamnamen kennen
+        st.sidebar.markdown("---")
+        st.sidebar.header("🔒 Forceer Teams")
+        
+        all_names = sorted(df["Name"].unique())
+        
+        must_include = st.sidebar.multiselect(
+            "Forceer Include (Moet in team)", 
+            options=all_names,
+            help="Deze teams worden ALTIJD geselecteerd."
+        )
+        
+        # Filter included uit options voor exclude om verwarring te voorkomen
+        remain_for_exclude = [n for n in all_names if n not in must_include]
+        
+        must_exclude = st.sidebar.multiselect(
+            "Forceer Exclude (Mag niet in team)", 
+            options=remain_for_exclude,
+            help="Deze teams worden NOOIT geselecteerd."
+        )
+        
+        with st.expander("🔍 Bekijk geüploade data"):
+            st.dataframe(df)
+
+    except Exception as e:
+        st.error(f"❌ Fout bij verwerken bestand: {e}")
+        st.stop()
+else:
+    st.info("Upload een Excel bestand om de Include/Exclude opties te zien.")
     st.stop()
-
-try:
-    df = pd.read_excel(uploaded_file)
-except Exception as e:
-    st.error(f"❌ Fout bij lezen bestand: {e}")
-    st.stop()
-
-# Check verplichte kolommen
-required_cols = {"Name", "Value", "OutcomeTier"}
-if not required_cols.issubset(df.columns):
-    st.error(f"❌ Het bestand mist: {required_cols - set(df.columns)}")
-    st.stop()
-
-# GameID is optioneel, maar nodig voor brackets
-if "GameID" not in df.columns:
-    st.warning("⚠️ Geen 'GameID' kolom gevonden. Wedstrijd-koppeling werkt niet optimaal.")
-    df["GameID"] = df.index 
-
-# Data types veilig stellen
-df["OutcomeTier"] = pd.to_numeric(df["OutcomeTier"], errors='coerce').fillna(3).astype(int)
-nba_teams = df.to_dict("records")
-
-with st.expander("🔍 Bekijk geüploade data"):
-    st.dataframe(df)
 
 # ==========================================
-# 3. SIMULATION LOGIC (FIXED POINTS)
+# 3. SIMULATION LOGIC
 # ==========================================
 
 def run_simulation_for_all_games(teams_data):
     """
-    Simuleert wedstrijden.
-    De winnaar krijgt 'Pts WIN', de verliezer krijgt 'Pts LOSS'.
+    Simuleert wedstrijden. Winnaar krijgt Pts WIN, Verliezer Pts LOSS.
     """
     simulated_scores = {}
     simulated_outcomes = {}
     
-    # 1. Groepeer teams per GameID
     games = defaultdict(list)
     for t in teams_data:
         gid = t.get("GameID")
@@ -128,24 +153,18 @@ def run_simulation_for_all_games(teams_data):
         else:
             games[f"solo_{t['Name']}"].append(t)
 
-    # 2. Speel de wedstrijden
     for gid, opponents in games.items():
         if len(opponents) == 2:
-            # Team A vs Team B
             tA = opponents[0]
             tB = opponents[1]
             
-            # Haal settings op voor beide teams op basis van hun Tier
             settA = tier_settings.get(tA["OutcomeTier"], {"prob": 50, "pts_win": 0, "pts_loss": 0})
             settB = tier_settings.get(tB["OutcomeTier"], {"prob": 50, "pts_win": 0, "pts_loss": 0})
             
-            # Bereken relatieve kans: A / (A + B)
             total_prob = settA["prob"] + settB["prob"]
             if total_prob == 0: total_prob = 1
-            
             prob_A_wins = settA["prob"] / total_prob
             
-            # Gooi dobbelsteen
             if random.random() < prob_A_wins:
                 # A Wint
                 simulated_scores[tA["Name"]] = settA["pts_win"]
@@ -158,13 +177,10 @@ def run_simulation_for_all_games(teams_data):
                 simulated_scores[tB["Name"]] = settB["pts_win"]
                 simulated_outcomes[tA["Name"]] = "LOSS"
                 simulated_outcomes[tB["Name"]] = "WIN"
-                
         else:
-            # Solo teams (geen tegenstander in file), simuleer op basis van ruwe kans
             for t in opponents:
                 sett = tier_settings.get(t["OutcomeTier"], {"prob": 50, "pts_win": 0, "pts_loss": 0})
                 is_win = random.random() < (sett["prob"] / 100.0)
-                
                 simulated_scores[t["Name"]] = sett["pts_win"] if is_win else sett["pts_loss"]
                 simulated_outcomes[t["Name"]] = "WIN" if is_win else "LOSS"
 
@@ -185,17 +201,17 @@ if st.button("🚀 Start Optimalisatie"):
     for i in range(num_lineups):
         status_text.text(f"Lineup {i+1} aan het berekenen...")
         
-        # A. Simuleer punten (Win/Loss) voor alle teams
+        # A. Simulatie
         sim_scores, sim_outcomes = run_simulation_for_all_games(nba_teams)
 
-        # B. Setup Solver
+        # B. Problem Setup
         prob = LpProblem(f"NBA_Lineup_{i}", LpMaximize)
         x = LpVariable.dicts("Select", [t["Name"] for t in nba_teams], cat="Binary")
 
-        # Doel: Maximaliseer de GESIMULEERDE punten (uit de tabel)
+        # Objective
         prob += lpSum([x[t["Name"]] * sim_scores[t["Name"]] for t in nba_teams])
 
-        # Constraints
+        # Basis Constraints
         prob += lpSum([x[t["Name"]] for t in nba_teams]) == team_size
         prob += lpSum([x[t["Name"]] * t["Value"] for t in nba_teams]) <= budget
         
@@ -210,10 +226,20 @@ if st.button("🚀 Start Optimalisatie"):
                 teams_in_game = [t["Name"] for t in nba_teams if t.get("GameID") == gid]
                 if len(teams_in_game) > 1:
                     prob += lpSum([x[name] for name in teams_in_game]) <= 1
+        
+        # --- NIEUW: INCLUDE / EXCLUDE CONSTRAINTS ---
+        for name in must_include:
+            if name in x:
+                prob += x[name] == 1, f"ForceInclude_{name}_{i}"
+        
+        for name in must_exclude:
+            if name in x:
+                prob += x[name] == 0, f"ForceExclude_{name}_{i}"
 
+        # Solve
         prob.solve()
 
-        # C. Resultaten opslaan
+        # C. Resultaten
         if prob.status == 1:
             selected_names = [t["Name"] for t in nba_teams if x[t["Name"]].value() == 1]
             prev_lineups.append(set(selected_names))
@@ -227,7 +253,6 @@ if st.button("🚀 Start Optimalisatie"):
                     row["Lineup ID"] = i + 1
                     lineup_data.append(row)
             
-            # Sorteren op punten
             lineup_data.sort(key=lambda x: x["Simulated Points"], reverse=True)
             results.extend(lineup_data)
         
@@ -238,7 +263,6 @@ if st.button("🚀 Start Optimalisatie"):
     if results:
         df_results = pd.DataFrame(results)
         
-        # Kolommen netjes ordenen
         cols_to_show = ["Lineup ID", "Name", "GameID", "OutcomeTier", "Outcome", "Simulated Points", "Value"]
         final_cols = [c for c in cols_to_show if c in df_results.columns]
         
@@ -261,6 +285,6 @@ if st.button("🚀 Start Optimalisatie"):
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
             df_results.to_excel(writer, index=False)
         buf.seek(0)
-        st.download_button("📥 Download Excel", buf, "nba_fixed_points_results.xlsx")
+        st.download_button("📥 Download Excel", buf, "nba_optimizer_v4.xlsx")
     else:
-        st.error("Geen oplossingen gevonden. Check je constraints!")
+        st.error("Geen oplossingen gevonden. Heb je onmogelijke 'Includes' of Constraints ingesteld?")
