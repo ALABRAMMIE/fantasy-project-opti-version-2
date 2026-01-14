@@ -20,7 +20,7 @@ st.sidebar.header("⚙️ Instellingen")
 
 budget = st.sidebar.number_input("Max Budget", value=100.0, step=0.5)
 team_size = st.sidebar.number_input("Team Grootte", min_value=1, value=5)
-num_lineups = st.sidebar.number_input("Aantal Lineups", min_value=1, max_value=50, value=10)
+num_lineups = st.sidebar.number_input("Aantal Lineups", min_value=1, max_value=1000, value=10)
 min_diff = st.sidebar.number_input("Minimaal verschil (spelers)", value=1)
 avoid_opposing = st.sidebar.checkbox("Max 1 team per wedstrijd kiezen", value=True)
 
